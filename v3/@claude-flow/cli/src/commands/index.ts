@@ -78,6 +78,8 @@ const commandLoaders: Record<string, CommandLoader> = {
   autopilot: () => import('./autopilot.js'),
   // GAIA Benchmark Harness (ADR-133)
   'gaia-bench': () => import('./gaia-bench.js'),
+  // Claude plan usage (current session + weekly limits)
+  usage: () => import('./usage.js'),
 };
 
 // Cache for loaded commands
@@ -240,7 +242,7 @@ export async function getCommandsByCategory(): Promise<Record<string, Command[]>
     analyzeCmd, routeCmd, progressCmd, providersCmd,
     pluginsCmd, deploymentCmd, claimsCmd, issuesCmd,
     updateCmd, processCmd, guidanceCmd, applianceCmd,
-    cleanupCmd, autopilotCmd,
+    cleanupCmd, autopilotCmd, usageCmd,
   ] = await Promise.all([
     loadCommand('daemon'), loadCommand('doctor'), loadCommand('embeddings'), loadCommand('neural'),
     loadCommand('performance'), loadCommand('security'), loadCommand('ruvector'), loadCommand('hive-mind'),
@@ -248,7 +250,7 @@ export async function getCommandsByCategory(): Promise<Record<string, Command[]>
     loadCommand('analyze'), loadCommand('route'), loadCommand('progress'), loadCommand('providers'),
     loadCommand('plugins'), loadCommand('deployment'), loadCommand('claims'), loadCommand('issues'),
     loadCommand('update'), loadCommand('process'), loadCommand('guidance'), loadCommand('appliance'),
-    loadCommand('cleanup'), loadCommand('autopilot'),
+    loadCommand('cleanup'), loadCommand('autopilot'), loadCommand('usage'),
   ]);
 
   return {
@@ -266,7 +268,7 @@ export async function getCommandsByCategory(): Promise<Record<string, Command[]>
       migrateCmd, workflowCmd,
     ].filter(Boolean) as Command[],
     analysis: [
-      analyzeCmd, routeCmd, progressCmd,
+      analyzeCmd, routeCmd, progressCmd, usageCmd,
     ].filter(Boolean) as Command[],
     management: [
       providersCmd, pluginsCmd, deploymentCmd, claimsCmd,

@@ -64,6 +64,11 @@ const CONFIG = {
   //   RUFLO_STATUSLINE_HIDE_COST    1/true/yes/on removes the segment entirely.
   costSymbol: process.env.RUFLO_STATUSLINE_COST_SYMBOL ?? '$',
   hideCost: /^(1|true|yes|on)$/i.test(process.env.RUFLO_STATUSLINE_HIDE_COST || ''),
+  // Claude plan usage bars (current session + weekly limits). Data comes from
+  // Claude Code's documented rate_limits stdin field (v2.1.80+); when absent the
+  // section falls back to the cache written by 'ruflo usage'. No network call.
+  //   RUFLO_STATUSLINE_HIDE_USAGE  1/true/yes/on removes the usage section.
+  hideUsage: /^(1|true|yes|on)$/i.test(process.env.RUFLO_STATUSLINE_HIDE_USAGE || ''),
 };
 
 const CWD = process.cwd();
@@ -361,6 +366,95 @@ function getCostFromStdin() {
   return null;
 }
 
+// ─── Claude plan usage (current session + weekly limits) ────────
+// Source order: (1) Claude Code's documented rate_limits stdin field
+// (used_percentage + resets_at epoch seconds, v2.1.80+); (2) fallback to the
+// cache written by 'ruflo usage' at .claude-flow/usage/cache.json. No network
+// call happens here — the statusline must stay fast.
+
+// Unix timestamps in seconds are ~1.7e9; in milliseconds ~1.7e12. Values below
+// this threshold are treated as seconds and scaled up to milliseconds.
+const RESET_MS_THRESHOLD = 1e12;
+const USAGE_BAR_WIDTH = 20;   // characters per usage bar
+const USAGE_PCT_HIGH = 75;    // >= this => red
+const USAGE_PCT_MED = 50;     // >= this => yellow (else green)
+
+function parseResetMs(v) {
+  if (v == null) return 0;
+  if (typeof v === 'number') return v < RESET_MS_THRESHOLD ? v * 1000 : v;
+  const t = Date.parse(v);
+  return isNaN(t) ? 0 : t;
+}
+
+function fmtResetIn(ms, now) {
+  if (!ms) return '';
+  const diff = ms - now;
+  if (diff <= 0) return 'resets now';
+  const totalMin = Math.floor(diff / 60000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h >= 24) return 'resets in ' + Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
+  if (h > 0) return 'resets in ' + h + 'h ' + m + 'm';
+  return 'resets in ' + m + 'm';
+}
+
+function fmtAgo(ts, now) {
+  const diff = Math.max(0, now - ts);
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return 'just now';
+  if (min < 60) return min + 'm ago';
+  return Math.floor(min / 60) + 'h ' + (min % 60) + 'm ago';
+}
+
+function pickPct(win) {
+  if (!win) return null;
+  if (typeof win.used_percentage === 'number') return win.used_percentage;
+  if (typeof win.utilization === 'number') return win.utilization;
+  return null;
+}
+
+// Returns { source: 'live'|'cache', fetchedAt, windows: [{label,pct,resetMs}] } or null
+function getUsageWindows() {
+  const order = [
+    ['five_hour', 'Current session'],
+    ['seven_day', 'Weekly (all)'],
+    ['seven_day_sonnet', 'Weekly (Sonnet)'],
+    ['seven_day_opus', 'Weekly (Opus)'],
+  ];
+
+  const sd = getStdinData();
+  if (sd && sd.rate_limits && typeof sd.rate_limits === 'object') {
+    const w = [];
+    for (const pair of order) {
+      const win = sd.rate_limits[pair[0]];
+      const pct = pickPct(win);
+      if (pct != null) w.push({ label: pair[1], pct: Math.round(pct), resetMs: parseResetMs(win.resets_at) });
+    }
+    if (w.length) return { source: 'live', fetchedAt: Date.now(), windows: w };
+  }
+
+  const cache = readJSON(path.join(CWD, '.claude-flow', 'usage', 'cache.json'));
+  if (cache && cache.data) {
+    const w = [];
+    for (const pair of order) {
+      const win = cache.data[pair[0]];
+      const pct = pickPct(win);
+      if (pct != null) w.push({ label: pair[1], pct: Math.round(pct), resetMs: parseResetMs(win.resets_at) });
+    }
+    if (w.length) return { source: 'cache', fetchedAt: cache.fetchedAt || 0, windows: w };
+  }
+
+  return null;
+}
+
+function usageBar(pct) {
+  const width = USAGE_BAR_WIDTH;
+  const clamped = Math.max(0, Math.min(100, pct || 0));
+  const filled = Math.round((clamped / 100) * width);
+  const col = clamped >= USAGE_PCT_HIGH ? c.brightRed : clamped >= USAGE_PCT_MED ? c.brightYellow : c.brightGreen;
+  return '[' + col + '█'.repeat(filled) + c.reset + c.dim + '░'.repeat(width - filled) + c.reset + ']';
+}
+
 // Read package version from the first package.json we find.
 function getPkgVersion() {
   let ver = '3.6';
@@ -548,6 +642,23 @@ function generateStatusline() {
     c.cyan + 'Tests' + c.reset + ' ' + testColor + '●' + testFiles + c.reset + ' ' + c.dim + '(~' + testCases + ' cases)' + c.reset + '  ' + c.dim + '│' + c.reset + '  ' +
     integStr
   );
+
+  // Line 5+: Claude plan usage (current session + weekly limits)
+  if (!CONFIG.hideUsage) {
+    const usage = getUsageWindows();
+    if (usage && usage.windows.length) {
+      const nowMs = Date.now();
+      for (const u of usage.windows) {
+        const resetStr = u.resetMs ? ' ' + c.dim + '· ' + fmtResetIn(u.resetMs, nowMs) + c.reset : '';
+        lines.push(u.label.padEnd(16) + usageBar(u.pct) + ' ' + u.pct + '% used' + resetStr);
+      }
+      const footer = usage.source === 'cache'
+        ? 'Updated ' + fmtAgo(usage.fetchedAt, nowMs) + ' (cached)'
+        : 'Updated just now';
+      lines.push('');
+      lines.push(c.dim + footer + c.reset);
+    }
+  }
 
   return lines.join('\\n');
 }
