@@ -22,7 +22,7 @@
 
 # Ruflo
 
-**Multi-agent AI orchestration for Claude Code**
+**Multi-agent AI harness for Claude Code and Codex**
 
 </div>
 
