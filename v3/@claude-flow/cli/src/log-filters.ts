@@ -1,5 +1,5 @@
 /**
- * Console filter installed at the top of every entry point. Three jobs:
+ * Console filter installed at the top of every entry point. Four jobs:
  *
  * 1. Suppress the cosmetic "[AgentDB Patch] Controller index not found"
  *    warning emitted by agentic-flow's runtime patch (it expects agentdb
@@ -29,6 +29,14 @@
  *    itself fails, the user still sees `[WARN] No results found` from
  *    the calling command which surfaces the real symptom.
  *
+ * 4. (`--quiet` / `-Q`) Fully suppress the upstream embedder boot banner
+ *    ("Loading ONNX model: ...", "ONNX embedder ready: ...", "  Disk cache
+ *    hit: ...") on BOTH stdout and stderr. Without --quiet these are only
+ *    redirected to stderr (job 2); with --quiet they are dropped entirely —
+ *    for cron/scripts that want a silent run. --quiet/-Q is a registered
+ *    global flag (parser.ts); we read it from argv here because this module
+ *    loads before arg parsing.
+ *
  * This file MUST be imported as the first side-effect import in any entry
  * point so the patch is in place before agentic-flow / ruvector / agentdb
  * (and anything that transitively imports them) loads. ES module imports
@@ -54,6 +62,36 @@ const STDERR_REDIRECT_PREFIXES = [
   '✅ ',                            // ruvector-onnx-embeddings-wasm parallel-embedder.mjs (workers ready)
   '  Disk cache hit: ',             // ruvector-onnx-embeddings-wasm parallel-embedder.mjs
 ];
+
+// (4) `--quiet` / `-Q`: when set, the embedder boot banner is dropped entirely
+// rather than redirected to stderr. Read from argv because this module loads
+// before the parser runs. Honour explicit negation (--no-quiet); match a
+// short-flag cluster containing Q since boolean shorts can combine (e.g. -rQ).
+const QUIET: boolean = (() => {
+  const argv = process.argv.slice(2);
+  if (argv.includes('--no-quiet')) return false;
+  if (argv.includes('--quiet')) return true;
+  return argv.some((a) => /^-[A-Za-z]*Q[A-Za-z]*$/.test(a));
+})();
+
+// Embedder boot lines emitted via console.error (NOT covered by the console.log
+// redirect list above — e.g. ruvector's onnx-embedder.js / onnx-optimized.js)
+// plus the "Loading ONNX model" lines from agentic-flow. Pinned to known
+// upstream prefixes; matched with startsWith so unrelated output is untouched.
+const EMBEDDER_BOOT_PREFIXES = [
+  'ONNX embedder ready: ',           // ruvector/dist/core/onnx-embedder.js (console.error)
+  'Optimized ONNX embedder ready: ', // ruvector/dist/core/onnx-optimized.js (console.error)
+  '📦 Loading ONNX model: ',         // agentic-flow onnx.js / onnx-local.js (console.log)
+  'Loading ONNX model: ',            // emoji-less variant
+];
+
+const isEmbedderBootNoise = (msg: unknown): boolean => {
+  const s = String(msg ?? '');
+  for (const prefix of EMBEDDER_BOOT_PREFIXES) {
+    if (s.startsWith(prefix)) return true;
+  }
+  return false;
+};
 
 // (3) Suppress the agentdb mock-embedder-fallback cluster. Each entry below
 // matches the EXACT prefix `console.warn` argument from
@@ -99,9 +137,19 @@ console.warn = (...args: unknown[]) => {
 };
 console.log = (...args: unknown[]) => {
   if (isCosmeticAgentdbPatchNoise(args[0])) return;
+  // --quiet: drop embedder boot noise entirely instead of redirecting it.
+  if (QUIET && (shouldRedirectToStderr(args[0]) || isEmbedderBootNoise(args[0]))) return;
   if (shouldRedirectToStderr(args[0])) {
     origError(...args);
     return;
   }
   origLog(...args);
+};
+
+// console.error is patched ONLY to honour --quiet for the embedder boot banner
+// (e.g. ruvector's "ONNX embedder ready: ..."). All other error output — real
+// diagnostics — flows through untouched, and without --quiet this is a no-op.
+console.error = (...args: unknown[]) => {
+  if (QUIET && isEmbedderBootNoise(args[0])) return;
+  origError(...args);
 };
